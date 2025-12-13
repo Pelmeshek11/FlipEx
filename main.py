@@ -14,12 +14,16 @@ from aiocryptopay import AioCryptoPay, Networks
 import os
 from dotenv import load_dotenv
 from aiohttp import web
+import socket
 
 # Загружаем переменные из .env файла
 load_dotenv()
 
 # ========== КОНФИГУРАЦИЯ ==========
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -27,6 +31,7 @@ router = Router()
 TOKEN = os.getenv('BOT_TOKEN')
 CRYPTO_PAY_TOKEN = os.getenv('CRYPTO_PAY_TOKEN')
 USE_TESTNET = os.getenv('USE_TESTNET')
+PORT = int(os.getenv('PORT', 8080))  # Порт для HTTP-сервера
 
 # Проверка обязательных переменных
 if not TOKEN or not CRYPTO_PAY_TOKEN:
@@ -53,14 +58,127 @@ crypto_pay = AioCryptoPay(
     network=Networks.MAIN_NET
 )
 
+# ========== HTTP СЕРВЕР ДЛЯ CRON/PING ==========
+async def handle_health(request):
+    """Обработчик для health check"""
+    return web.Response(text="OK")
 
+async def handle_root(request):
+    """Обработчик для корневого пути"""
+    return web.json_response({
+        "status": "online",
+        "service": "Crypto Exchange Bot",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "health": "/health",
+            "status": "/status"
+        }
+    })
+
+async def handle_status(request):
+    """Обработчик для проверки статуса бота"""
+    try:
+        conn = sqlite3.connect("crypto_exchange.db")
+        cursor = conn.cursor()
+        
+        # Получаем статистику
+        cursor.execute('SELECT COUNT(*) FROM users')
+        users_count = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM exchanges')
+        exchanges_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM exchanges WHERE status = 'completed'")
+        completed_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM exchanges WHERE status = 'pending'")
+        pending_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return web.json_response({
+            "status": "running",
+            "bot": "online",
+            "database": "connected",
+            "users": users_count,
+            "total_exchanges": exchanges_count,
+            "completed_exchanges": completed_count,
+            "pending_exchanges": pending_count,
+            "uptime": get_uptime(),
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return web.json_response({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+
+def get_uptime():
+    """Возвращает время работы сервера"""
+    if not hasattr(get_uptime, 'start_time'):
+        get_uptime.start_time = datetime.now()
+    uptime = datetime.now() - get_uptime.start_time
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    if days > 0:
+        return f"{days}d {hours}h {minutes}m"
+    elif hours > 0:
+        return f"{hours}h {minutes}m {seconds}s"
+    else:
+        return f"{minutes}m {seconds}s"
+
+async def start_http_server():
+    """Запуск HTTP сервера"""
+    app = web.Application()
+    
+    # Добавляем маршруты
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/status', handle_status)
+    
+    # Получаем IP-адрес для привязки
+    host = '0.0.0.0'  # Слушаем все интерфейсы
+    
+    # Пытаемся запустить на указанном порту
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    try:
+        site = web.TCPSite(runner, host, PORT)
+        await site.start()
+        logger.info(f"✅ HTTP сервер запущен на http://{host}:{PORT}")
+        
+        # Выводим информацию о доступных эндпоинтах
+        logger.info(f"📡 Доступные эндпоинты:")
+        logger.info(f"   • http://{host}:{PORT}/ - информация о сервисе")
+        logger.info(f"   • http://{host}:{PORT}/health - health check")
+        logger.info(f"   • http://{host}:{PORT}/status - статус бота")
+        
+    except OSError as e:
+        logger.error(f"❌ Не удалось запустить HTTP сервер на порту {PORT}: {e}")
+        logger.info("Пробуем использовать случайный порт...")
+        
+        # Пробуем найти свободный порт
+        for port in range(8080, 8100):
+            try:
+                site = web.TCPSite(runner, host, port)
+                await site.start()
+                logger.info(f"✅ HTTP сервер запущен на http://{host}:{port}")
+                return port
+            except OSError:
+                continue
+        
+        logger.error("❌ Не удалось найти свободный порт для HTTP сервера")
+        return None
+    
+    return PORT
 
 # ========== КЭШИРОВАНИЕ КУРСОВ ==========
 exchange_rates_cache = {}
 cache_expiry = None
 CACHE_DURATION = 300  # 5 минут в секундах
-
-
 
 async def get_exchange_rate_with_cache(from_currency: str, to_currency: str) -> Decimal:
     """Получает курс обмена с кэшированием"""
@@ -695,24 +813,47 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-
-
     ADMIN_ID = 7511053219  # Ваш Telegram ID
-     # Отправляем уведомление администратору о запуске
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            "🤖 *Бот успешно запущен!*\n\n",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logging.error(f"Не удалось отправить уведомление администратору: {e}")
     
-
-   
+    try:
+        # Запускаем HTTP сервер в фоновом режиме
+        http_port = await start_http_server()
+        
+        if http_port:
+            logger.info(f"✅ HTTP сервер успешно запущен на порту {http_port}")
+        else:
+            logger.warning("⚠️ HTTP сервер не запущен, но бот продолжит работу")
+        
+        # Отправляем уведомление администратору о запуске
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🤖 *Бот успешно запущен!*\n\n"
+                f"• HTTP сервер: {'запущен' if http_port else 'не запущен'}\n"
+                f"• Порт: {http_port if http_port else 'N/A'}\n"
+                f"• Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"• Режим: {'Testnet' if USE_TESTNET else 'Mainnet'}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление администратору: {e}")
+        
+        # Запускаем бота
+        logger.info("🤖 Запуск Telegram бота...")
+        await dp.start_polling(bot, skip_updates=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска бота: {e}")
+    finally:
+        # Закрываем соединения при завершении
+        await bot.session.close()
+        logger.info("👋 Бот остановлен")
 
 if __name__ == "__main__":
-    
-    asyncio.run(main())
-
-
+    # Создаем event loop и запускаем main
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал прерывания, завершаем работу...")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
