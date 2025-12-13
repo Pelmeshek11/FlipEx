@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: crypto-exchange-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: BOT_TOKEN
+        sync: false
+      - key: CRYPTO_PAY_TOKEN
+        sync: false
