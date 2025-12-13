@@ -42,7 +42,7 @@ if not TOKEN or not CRYPTO_PAY_TOKEN:
 USDT_MAX_LIMIT = Decimal('0.5')
 COMMISSION = Decimal('0.05')
 
-# Валюты
+# Валюты (теперь только исходные, целевая всегда USDT)
 CRYPTO_ASSETS = {
     'BTC': {'name': 'Bitcoin', 'decimals': 6},
     'ETH': {'name': 'Ethereum', 'decimals': 5},
@@ -180,8 +180,8 @@ exchange_rates_cache = {}
 cache_expiry = None
 CACHE_DURATION = 300  # 5 минут в секундах
 
-async def get_exchange_rate_with_cache(from_currency: str, to_currency: str) -> Decimal:
-    """Получает курс обмена с кэшированием"""
+async def get_exchange_rate_with_cache(from_currency: str, to_currency: str = 'USDT') -> Decimal:
+    """Получает курс обмена с кэшированием (всегда на USDT)"""
     global exchange_rates_cache, cache_expiry
     
     current_time = datetime.now().timestamp()
@@ -203,7 +203,7 @@ async def get_exchange_rate_with_cache(from_currency: str, to_currency: str) -> 
             logger.error(f"Ошибка обновления кэша курсов: {e}")
             # Если не удалось обновить, используем старый кэш или возвращаем ошибку
     
-    # Пытаемся найти прямой курс
+    # Пытаемся найти прямой курс на USDT
     direct_key = f"{from_currency}_{to_currency}"
     if direct_key in exchange_rates_cache:
         return exchange_rates_cache[direct_key]
@@ -224,10 +224,9 @@ async def get_exchange_rate_with_cache(from_currency: str, to_currency: str) -> 
 
 # ========== СОСТОЯНИЯ FSM ==========
 class ExchangeStates(StatesGroup):
-    choosing_from_currency = State()
-    choosing_to_currency = State()
-    entering_amount = State()
-    confirming_exchange = State()
+    choosing_from_currency = State()  # Шаг 1: Выбор валюты для обмена
+    entering_amount = State()         # Шаг 2: Ввод суммы
+    confirming_exchange = State()     # Шаг 3: Подтверждение
 
 # ========== БАЗА ДАННЫХ SQLite ==========
 class Database:
@@ -261,9 +260,10 @@ class Database:
                     user_id INTEGER NOT NULL,
                     exchange_id TEXT UNIQUE NOT NULL,
                     from_currency TEXT NOT NULL,
-                    to_currency TEXT NOT NULL,
+                    to_currency TEXT DEFAULT 'USDT',
                     amount TEXT NOT NULL,
                     commission TEXT NOT NULL,
+                    commission_usdt TEXT NOT NULL,
                     final_amount TEXT NOT NULL,
                     amount_usdt TEXT,
                     invoice_id INTEGER,
@@ -289,12 +289,13 @@ class Database:
 db = Database()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-def get_currency_keyboard(action: str):
+def get_currency_keyboard():
+    """Создает клавиатуру для выбора исходной валюты"""
     keyboard = []
     row = []
     for currency_code, currency_info in CRYPTO_ASSETS.items():
-        button_text = f"{currency_info['name']} ({currency_code})"
-        callback_data = f"{action}:{currency_code}"
+        button_text = f"{currency_info['name']} ({currency_code}) → USDT"
+        callback_data = f"from_currency:{currency_code}"
         row.append(InlineKeyboardButton(text=button_text, callback_data=callback_data))
         if len(row) == 2:
             keyboard.append(row)
@@ -306,11 +307,6 @@ def get_currency_keyboard(action: str):
 def format_amount(amount: Decimal, currency: str) -> str:
     decimals = CRYPTO_ASSETS[currency]['decimals']
     return f"{amount:.{decimals}f}"
-
-def calculate_final_amount(amount: Decimal, commission: Decimal = COMMISSION) -> tuple:
-    commission_amount = amount * commission
-    final_amount = amount - commission_amount
-    return final_amount, commission_amount
 
 def get_or_create_user(telegram_id: int, username: str, full_name: str) -> int:
     conn = db.get_connection()
@@ -333,16 +329,17 @@ def get_or_create_user(telegram_id: int, username: str, full_name: str) -> int:
     return user_id
 
 async def validate_usdt_limit(amount: Decimal, currency: str) -> tuple:
-    """Проверяет лимит 0.5 USDT с использованием кэширования курсов"""
+    """Проверяет лимит 0.5 USDT и возвращает курс"""
     try:
         # Если валюта уже USDT, проверяем напрямую
         if currency == 'USDT':
+            amount_usdt = amount
             if amount > USDT_MAX_LIMIT:
-                return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT", amount
-            return True, "", amount
+                return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT", amount_usdt, Decimal('1')
+            return True, "", amount_usdt, Decimal('1')
         
         # Получаем курс через кэш
-        rate_to_usdt = await get_exchange_rate_with_cache(currency, 'USDT')
+        rate_to_usdt = await get_exchange_rate_with_cache(currency)
         
         if not rate_to_usdt:
             # В тестовом режиме используем фиксированные курсы
@@ -360,57 +357,48 @@ async def validate_usdt_limit(amount: Decimal, currency: str) -> tuple:
                 rate_to_usdt = test_rates.get(currency)
             
             if not rate_to_usdt:
-                return False, f"Не удалось получить курс {currency}/USDT", Decimal('0')
+                return False, f"Не удалось получить курс {currency}/USDT", Decimal('0'), Decimal('0')
         
         # Конвертируем сумму в USDT
         amount_usdt = amount * rate_to_usdt
         
         # Проверяем минимум $0.01
         if amount_usdt < Decimal('0.01'):
-            return False, f"Минимальная сумма: $0.01 USDT (~{amount_usdt:.4f} USDT)", amount_usdt
+            return False, f"Минимальная сумма: $0.01 USDT (~{amount_usdt:.4f} USDT)", amount_usdt, rate_to_usdt
         
         # Проверяем лимит 0.5 USDT
         if amount_usdt > USDT_MAX_LIMIT:
-            return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT (~{amount_usdt:.4f} USDT)", amount_usdt
+            return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT (~{amount_usdt:.4f} USDT)", amount_usdt, rate_to_usdt
         
         # Логируем для отладки
         logger.info(f"Курс {currency}/USDT: {rate_to_usdt}, сумма {amount} {currency} = {amount_usdt:.4f} USDT")
         
-        return True, "", amount_usdt
+        return True, "", amount_usdt, rate_to_usdt
         
     except Exception as e:
         logger.error(f"Ошибка проверки лимита USDT: {e}")
-        return False, "Ошибка проверки суммы", Decimal('0')
+        return False, "Ошибка проверки суммы", Decimal('0'), Decimal('0')
 
 # ========== КОМАНДА ДЛЯ ПРОВЕРКИ КУРСОВ ==========
 @router.message(Command("rates"))
 async def cmd_rates(message: Message):
-    """Показывает все доступные курсы обмена"""
+    """Показывает курсы всех валют к USDT"""
     try:
-        rates = await crypto_pay.get_exchange_rates()
+        # Получаем курсы из кэша или API
+        rates_text = "📈 <b>Курсы валют к USDT:</b>\n\n"
         
-        if not rates:
-            await message.answer("❌ Не удалось получить курсы обмена")
-            return
+        for currency_code in CRYPTO_ASSETS.keys():
+            if currency_code == 'USDT':
+                continue
+                
+            rate = await get_exchange_rate_with_cache(currency_code)
+            if rate:
+                rates_text += f"<b>{currency_code}</b> → USDT: {rate}\n"
+            else:
+                rates_text += f"<b>{currency_code}</b> → USDT: не доступен\n"
         
-        # Группируем курсы по исходной валюте
-        rates_by_source = {}
-        for rate in rates:
-            if rate.source not in rates_by_source:
-                rates_by_source[rate.source] = []
-            rates_by_source[rate.source].append(rate)
-        
-        # Формируем сообщение
-        rates_text = "📈 <b>Доступные курсы обмена:</b>\n\n"
-        
-        for source in sorted(rates_by_source.keys()):
-            rates_text += f"<b>{source}:</b>\n"
-            for rate in rates_by_source[source]:
-                rates_text += f"  → {rate.target}: {rate.rate}\n"
-            rates_text += "\n"
-        
-        # Добавляем справку
-        rates_text += f"\n💡 <b>Лимит обмена:</b> {USDT_MAX_LIMIT} USDT"
+        rates_text += f"\n💡 <b>Лимит обмена:</b> {USDT_MAX_LIMIT} USDT\n"
+        rates_text += f"💸 <b>Комиссия:</b> {COMMISSION * 100}%"
         
         await message.answer(rates_text, parse_mode="HTML")
         
@@ -432,29 +420,28 @@ async def cmd_start(message: Message, state: FSMContext):
     welcome_text = f"""
 👋 Добро пожаловать в FlipExchange Bot!
 
-💰 <b>Основное условие:</b>
+💰 <b>Теперь бот работает только на обмен в USDT!</b>
+• Вы можете обменять BTC, ETH, SOL, TON, NOT на USDT
 • Максимальная сумма обмена: <b>{USDT_MAX_LIMIT} USDT</b>
 • Комиссия за обмен: <b>{COMMISSION * 100}%</b>
 
-💱 <b>Доступные валюты:</b>
+💱 <b>Доступные валюты для обмена на USDT:</b>
 • Bitcoin (BTC)
 • Ethereum (ETH)  
 • Solana (SOL)
 • Toncoin (TON)
 • Notcoin (NOT)
-• Tether (USDT)
 
 📊 <b>Примеры максимальных сумм (~{USDT_MAX_LIMIT} USDT):</b>
-• BTC: ~0.000014 BTC
+• BTC: ~0.000016 BTC
 • TON: ~0.25 TON
 • NOT: ~83 NOT
-• USDT: 0.5 USDT
 
 📈 <b>Как это работает:</b>
-1. Выбираете валюту для обмена
+1. Выбираете валюту для обмена на USDT
 2. Вводите сумму (конвертируется в USDT, лимит {USDT_MAX_LIMIT} USDT)
 3. Оплачиваете счет
-4. Получаете чек
+4. Получаете чек в USDT
 
 Чтобы начать, нажмите /exchange
 Для проверки статуса: /status
@@ -472,8 +459,8 @@ async def cmd_cancel(message: Message, state: FSMContext):
 @router.message(Command("exchange"))
 async def cmd_exchange(message: Message, state: FSMContext):
     await message.answer(
-        "🔄 Выберите валюту, которую хотите отправить:",
-        reply_markup=get_currency_keyboard("from_currency")
+        "🔄 Выберите валюту, которую хотите обменять на USDT:",
+        reply_markup=get_currency_keyboard()
     )
     await state.set_state(ExchangeStates.choosing_from_currency)
 
@@ -503,7 +490,7 @@ ID: {exchange['exchange_id']}
 Создан: {exchange['created_at']}
 Статус: {exchange['status']}
 Отдаете: {format_amount(Decimal(exchange['amount']), exchange['from_currency'])} {exchange['from_currency']}
-Получаете: {format_amount(Decimal(exchange['final_amount']), exchange['to_currency'])} {exchange['to_currency']}
+Получаете: {format_amount(Decimal(exchange['final_amount']), 'USDT')} USDT
 Комиссия: {format_amount(Decimal(exchange['commission']), exchange['from_currency'])} {exchange['from_currency']}
                 """
                 if exchange['check_url']:
@@ -530,28 +517,12 @@ ID: {exchange['exchange_id']}
 # ========== ОБРАБОТЧИКИ FSM ==========
 @router.callback_query(F.data.startswith("from_currency:"))
 async def process_from_currency(callback: CallbackQuery, state: FSMContext):
-    currency = callback.data.split(":")[1]
-    await state.update_data(from_currency=currency)
-    await callback.message.edit_text(
-        f"Вы выбрали: {CRYPTO_ASSETS[currency]['name']}\n\n"
-        "Теперь выберите валюту, которую хотите получить:",
-        reply_markup=get_currency_keyboard("to_currency")
-    )
-    await state.set_state(ExchangeStates.choosing_to_currency)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("to_currency:"))
-async def process_to_currency(callback: CallbackQuery, state: FSMContext):
-    currency = callback.data.split(":")[1]
-    await state.update_data(to_currency=currency)
-    
-    # Получаем данные из состояния, чтобы показать from_currency
-    data = await state.get_data()
-    from_currency = data.get('from_currency', 'неизвестно')
+    from_currency = callback.data.split(":")[1]
+    await state.update_data(from_currency=from_currency, to_currency='USDT')
     
     await callback.message.edit_text(
-        f"💱 <b>Обмен:</b> {CRYPTO_ASSETS[from_currency]['name']} → {CRYPTO_ASSETS[currency]['name']}\n\n"
-        f"Введите сумму {CRYPTO_ASSETS[from_currency]['name']}, которую хотите обменять.\n"
+        f"Вы выбрали: {CRYPTO_ASSETS[from_currency]['name']}\n\n"
+        f"Введите сумму {CRYPTO_ASSETS[from_currency]['name']}, которую хотите обменять на USDT.\n"
         f"<b>Лимит: {USDT_MAX_LIMIT} USDT в эквиваленте</b>\n\n"
         f"<i>Пример: 0.2</i>",
         parse_mode="HTML"
@@ -562,12 +533,11 @@ async def process_to_currency(callback: CallbackQuery, state: FSMContext):
 @router.message(ExchangeStates.entering_amount, F.text)
 async def process_amount(message: Message, state: FSMContext):
     try:
-        # Получаем данные из состояния перед обработкой суммы
+        # Получаем данные из состояния
         data = await state.get_data()
         from_currency = data.get('from_currency')
-        to_currency = data.get('to_currency')
         
-        if not from_currency or not to_currency:
+        if not from_currency:
             await message.answer("❌ Ошибка: не выбрана валюта. Начните заново: /exchange")
             await state.clear()
             return
@@ -579,34 +549,44 @@ async def process_amount(message: Message, state: FSMContext):
             await message.answer("❌ Сумма должна быть больше 0")
             return
         
-        # Проверка лимита в USDT
-        is_valid, error_msg, amount_usdt = await validate_usdt_limit(amount, from_currency)
+        # Проверка лимита в USDT и получение курса
+        is_valid, error_msg, amount_usdt, rate_to_usdt = await validate_usdt_limit(amount, from_currency)
         
         if not is_valid:
             await message.answer(f"❌ {error_msg}")
             return
         
-        # Расчет с учетом комиссии
-        final_amount, commission_amount = calculate_final_amount(amount)
+        # Расчет комиссии и итоговой суммы (КОРРЕКТНЫЙ РАСЧЕТ)
+        # 1. Комиссия в исходной валюте
+        commission_original = amount * COMMISSION
+        
+        # 2. Комиссия в USDT (по курсу)
+        commission_usdt = commission_original * rate_to_usdt
+        
+        # 3. Итоговая сумма в USDT после комиссии
+        final_amount_usdt = amount_usdt - commission_usdt
         
         # Сохраняем ВСЕ данные в состоянии
         await state.update_data({
             'amount': str(amount),
-            'final_amount': str(final_amount),
-            'commission_amount': str(commission_amount),
+            'final_amount': str(final_amount_usdt),  # в USDT
+            'commission_amount': str(commission_original),  # в исходной валюте
+            'commission_usdt': str(commission_usdt),  # в USDT
             'amount_usdt': str(amount_usdt),
+            'rate_to_usdt': str(rate_to_usdt),
             'from_currency': from_currency,
-            'to_currency': to_currency
+            'to_currency': 'USDT'
         })
         
+        # Формируем сообщение с подтверждением (ИСПРАВЛЕННЫЙ ФОРМАТ)
         confirmation_text = f"""
 ✅ <b>Подтвердите обмен:</b>
 
 📤 Отправляете: {format_amount(amount, from_currency)} {from_currency}
    (~{amount_usdt:.4f} USDT)
    
-📥 Получаете: {format_amount(final_amount, to_currency)} {to_currency}
-💸 Комиссия ({COMMISSION * 100}%): {format_amount(commission_amount, from_currency)} {from_currency}
+📥 Получаете: {format_amount(final_amount_usdt, 'USDT')} USDT
+💸 Комиссия ({COMMISSION * 100}%): {format_amount(commission_original, from_currency)} {from_currency} (~{commission_usdt:.4f} USDT)
 
 <b>Лимит обмена: {USDT_MAX_LIMIT} USDT</b>
 
@@ -634,7 +614,7 @@ async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         
         # Проверяем наличие обязательных полей
-        required_fields = ['from_currency', 'to_currency', 'amount', 'final_amount', 'commission_amount', 'amount_usdt']
+        required_fields = ['from_currency', 'amount', 'final_amount', 'commission_amount', 'commission_usdt', 'amount_usdt']
         missing_fields = [field for field in required_fields if field not in data]
         
         if missing_fields:
@@ -652,13 +632,13 @@ async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
         
         exchange_id = str(uuid.uuid4())[:8]
         
-        # Создание инвойса через Crypto Pay API
-        logger.info(f"Создание инвойса: {data['amount']} {data['from_currency']} -> {data['final_amount']} {data['to_currency']}")
+        # Создание инвойса через Crypto Pay API (в исходной валюте)
+        logger.info(f"Создание инвойса: {data['amount']} {data['from_currency']} -> {data['final_amount']} USDT")
         
         invoice = await crypto_pay.create_invoice(
             asset=data['from_currency'],
             amount=float(data['amount']),
-            description=f"Обмен {data['from_currency']} на {data['to_currency']}",
+            description=f"Обмен {data['from_currency']} на USDT",
             hidden_message=f"User {user_id} | Exchange: {exchange_id}",
             expires_in=900  # 15 минут
         )
@@ -669,13 +649,14 @@ async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
         cursor.execute('''
             INSERT INTO exchanges (
                 user_id, exchange_id, from_currency, to_currency,
-                amount, commission, final_amount, amount_usdt,
+                amount, commission, commission_usdt, final_amount, amount_usdt,
                 invoice_id, invoice_url, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            user_id, exchange_id, data['from_currency'], data['to_currency'],
-            data['amount'], data['commission_amount'], data['final_amount'],
-            data['amount_usdt'], invoice.invoice_id, invoice.bot_invoice_url, 'pending'
+            user_id, exchange_id, data['from_currency'], 'USDT',
+            data['amount'], data['commission_amount'], data['commission_usdt'], 
+            data['final_amount'], data['amount_usdt'],
+            invoice.invoice_id, invoice.bot_invoice_url, 'pending'
         ))
         
         exchange_db_id = cursor.lastrowid
@@ -693,7 +674,7 @@ async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
 
 ID обмена: {exchange_id}
 Сумма к оплате: {format_amount(Decimal(data['amount']), data['from_currency'])} {data['from_currency']}
-Получите: {format_amount(Decimal(data['final_amount']), data['to_currency'])} {data['to_currency']}
+Получите: {format_amount(Decimal(data['final_amount']), 'USDT')} USDT
 Комиссия: {format_amount(Decimal(data['commission_amount']), data['from_currency'])} {data['from_currency']}
 Эквивалент: ~{Decimal(data['amount_usdt']):.4f} USDT
 
@@ -749,9 +730,9 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Чек уже создан", show_alert=True)
             return
         
-        # Создаем чек
+        # Создаем чек в USDT
         check = await crypto_pay.create_check(
-            asset=exchange['to_currency'],
+            asset='USDT',
             amount=float(exchange['final_amount']),
             pin_to_user_id=callback.from_user.id
         )
@@ -774,7 +755,7 @@ ID операции: {exchange['exchange_id']}
 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 📤 Вы отправили: {format_amount(Decimal(exchange['amount']), exchange['from_currency'])} {exchange['from_currency']}
-📥 Вы получили: {format_amount(Decimal(exchange['final_amount']), exchange['to_currency'])} {exchange['to_currency']}
+📥 Вы получили: {format_amount(Decimal(exchange['final_amount']), 'USDT')} USDT
 💸 Комиссия: {format_amount(Decimal(exchange['commission']), exchange['from_currency'])} {exchange['from_currency']}
 
 💎 <b>Ваш чек:</b> {check.bot_check_url}
@@ -829,10 +810,11 @@ async def main():
             await bot.send_message(
                 ADMIN_ID,
                 f"🤖 *Бот успешно запущен!*\n\n"
+                f"• Режим: Только обмен на USDT\n"
                 f"• HTTP сервер: {'запущен' if http_port else 'не запущен'}\n"
                 f"• Порт: {http_port if http_port else 'N/A'}\n"
                 f"• Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"• Режим: {'Testnet' if USE_TESTNET else 'Mainnet'}",
+                f"• Режим сети: {'Testnet' if USE_TESTNET else 'Mainnet'}",
                 parse_mode="Markdown"
             )
         except Exception as e:
