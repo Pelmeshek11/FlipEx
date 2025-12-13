@@ -1,0 +1,3 @@
+aiogram==3.10.0
+aiocryptopay==0.4.8
+python-dotenv==1.0.0
