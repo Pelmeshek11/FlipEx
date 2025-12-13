@@ -59,6 +59,22 @@ exchange_rates_cache = {}
 cache_expiry = None
 CACHE_DURATION = 300  # 5 минут в секундах
 
+async def create_http_server():
+    """Создает простой HTTP-сервер для health checks"""
+    app = web.Application()
+    
+    # Правильный синтаксис для aiohttp routes
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health)
+    
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"HTTP server started on port {port}")
+    return runner
+
 async def get_exchange_rate_with_cache(from_currency: str, to_currency: str) -> Decimal:
     """Получает курс обмена с кэшированием"""
     global exchange_rates_cache, cache_expiry
@@ -309,7 +325,7 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     
     welcome_text = f"""
-👋 Добро пожаловать в Crypto Exchange Bot!
+👋 Добро пожаловать в FlipExchange Bot!
 
 💰 <b>Основное условие:</b>
 • Максимальная сумма обмена: <b>{USDT_MAX_LIMIT} USDT</b>
@@ -691,9 +707,31 @@ async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+
+    # Запускаем HTTP сервер (только если запускается как Web Service)
+    if os.environ.get('RENDER'):
+        http_runner = await create_http_server()
+
+    ADMIN_ID = 7511053219  # Ваш Telegram ID
+     # Отправляем уведомление администратору о запуске
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "🤖 *Бот успешно запущен!*\n\n",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление администратору: {e}")
+    
+
+     # Останавливаем HTTP сервер при завершении
+    if 'http_runner' in locals():
+        await http_runner.cleanup()
     
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    
     asyncio.run(main())
