@@ -13,6 +13,7 @@ import uuid
 from aiocryptopay import AioCryptoPay, Networks
 import os
 from dotenv import load_dotenv
+from aiohttp import web
 
 # Загружаем переменные из .env файла
 load_dotenv()
@@ -52,7 +53,7 @@ crypto_pay = AioCryptoPay(
     network=Networks.MAIN_NET
 )
 
-logger.info(f"✅ Бот инициализирован. Режим: {'ТЕСТОВЫЙ' if USE_TESTNET else 'ПРОДАКШЕН'}")
+
 
 # ========== КЭШИРОВАНИЕ КУРСОВ ==========
 exchange_rates_cache = {}
@@ -735,3 +736,4 @@ async def main():
 if __name__ == "__main__":
     
     asyncio.run(main())
+
