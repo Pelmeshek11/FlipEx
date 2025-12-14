@@ -49,7 +49,7 @@ CRYPTO_ASSETS = {
     'SOL': {'name': 'Solana', 'decimals': 3},
     'TON': {'name': 'Toncoin', 'decimals': 3},
     'NOT': {'name': 'Notcoin', 'decimals': 0},
-    'USDT': {'name': 'Tether', 'decimals': 2},
+    # USDT убрали, так как обмен только на USDT
 }
 
 # Инициализация Crypto Pay API
@@ -138,7 +138,7 @@ async def start_http_server():
     app.router.add_get('/health', handle_health)
     app.router.add_get('/status', handle_status)
     
-    # Получаем IP-адрес для привязки
+    # Получаем IP-адрес для привязку
     host = '0.0.0.0'  # Слушаем все интерфейсы
     
     # Пытаемся запустить на указанном порту
@@ -331,13 +331,6 @@ def get_or_create_user(telegram_id: int, username: str, full_name: str) -> int:
 async def validate_usdt_limit(amount: Decimal, currency: str) -> tuple:
     """Проверяет лимит 0.5 USDT и возвращает курс"""
     try:
-        # Если валюта уже USDT, проверяем напрямую
-        if currency == 'USDT':
-            amount_usdt = amount
-            if amount > USDT_MAX_LIMIT:
-                return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT", amount_usdt, Decimal('1')
-            return True, "", amount_usdt, Decimal('1')
-        
         # Получаем курс через кэш
         rate_to_usdt = await get_exchange_rate_with_cache(currency)
         
@@ -362,22 +355,25 @@ async def validate_usdt_limit(amount: Decimal, currency: str) -> tuple:
         # Конвертируем сумму в USDT
         amount_usdt = amount * rate_to_usdt
         
+        # Рассчитываем максимальную сумму в выбранной валюте
+        max_amount_in_currency = USDT_MAX_LIMIT / rate_to_usdt
+        
         # Проверяем минимум $0.01
         if amount_usdt < Decimal('0.01'):
-            return False, f"Минимальная сумма: $0.01 USDT (~{amount_usdt:.4f} USDT)", amount_usdt, rate_to_usdt
+            return False, f"Минимальная сумма: {format_amount(Decimal('0.01') / rate_to_usdt, currency)} {currency} ($0.01 USDT)", amount_usdt, rate_to_usdt, max_amount_in_currency
         
         # Проверяем лимит 0.5 USDT
         if amount_usdt > USDT_MAX_LIMIT:
-            return False, f"Максимальная сумма: {USDT_MAX_LIMIT} USDT (~{amount_usdt:.4f} USDT)", amount_usdt, rate_to_usdt
+            return False, f"Максимальная сумма: {format_amount(max_amount_in_currency, currency)} {currency} ({USDT_MAX_LIMIT} USDT)", amount_usdt, rate_to_usdt, max_amount_in_currency
         
         # Логируем для отладки
         logger.info(f"Курс {currency}/USDT: {rate_to_usdt}, сумма {amount} {currency} = {amount_usdt:.4f} USDT")
         
-        return True, "", amount_usdt, rate_to_usdt
+        return True, "", amount_usdt, rate_to_usdt, max_amount_in_currency
         
     except Exception as e:
         logger.error(f"Ошибка проверки лимита USDT: {e}")
-        return False, "Ошибка проверки суммы", Decimal('0'), Decimal('0')
+        return False, "Ошибка проверки суммы", Decimal('0'), Decimal('0'), Decimal('0')
 
 # ========== КОМАНДА ДЛЯ ПРОВЕРКИ КУРСОВ ==========
 @router.message(Command("rates"))
@@ -388,16 +384,16 @@ async def cmd_rates(message: Message):
         rates_text = "📈 <b>Курсы валют к USDT:</b>\n\n"
         
         for currency_code in CRYPTO_ASSETS.keys():
-            if currency_code == 'USDT':
-                continue
-                
             rate = await get_exchange_rate_with_cache(currency_code)
             if rate:
+                # Рассчитываем максимальную сумму в валюте
+                max_in_currency = USDT_MAX_LIMIT / rate
                 rates_text += f"<b>{currency_code}</b> → USDT: {rate}\n"
+                rates_text += f"   Макс. сумма: {format_amount(max_in_currency, currency_code)} {currency_code}\n\n"
             else:
-                rates_text += f"<b>{currency_code}</b> → USDT: не доступен\n"
+                rates_text += f"<b>{currency_code}</b> → USDT: не доступен\n\n"
         
-        rates_text += f"\n💡 <b>Лимит обмена:</b> {USDT_MAX_LIMIT} USDT\n"
+        rates_text += f"💡 <b>Общий лимит:</b> {USDT_MAX_LIMIT} USDT\n"
         rates_text += f"💸 <b>Комиссия:</b> {COMMISSION * 100}%"
         
         await message.answer(rates_text, parse_mode="HTML")
@@ -432,7 +428,7 @@ async def cmd_start(message: Message, state: FSMContext):
 • Toncoin (TON)
 • Notcoin (NOT)
 
-📊 <b>Примеры максимальных сумм (~{USDT_MAX_LIMIT} USDT):</b>
+📊 <b>Максимальные суммы в валютах:</b>
 • BTC: ~0.000016 BTC
 • TON: ~0.25 TON
 • NOT: ~83 NOT
@@ -518,13 +514,39 @@ ID: {exchange['exchange_id']}
 @router.callback_query(F.data.startswith("from_currency:"))
 async def process_from_currency(callback: CallbackQuery, state: FSMContext):
     from_currency = callback.data.split(":")[1]
-    await state.update_data(from_currency=from_currency, to_currency='USDT')
+    
+    # Получаем курс для расчета максимальной суммы
+    rate_to_usdt = await get_exchange_rate_with_cache(from_currency)
+    
+    if not rate_to_usdt:
+        # В тестовом режиме используем фиксированные курсы
+        if USE_TESTNET:
+            test_rates = {
+                'BTC': Decimal('30000'),
+                'ETH': Decimal('2000'),
+                'TON': Decimal('2'),
+                'SOL': Decimal('100'),
+                'NOT': Decimal('0.006'),
+            }
+            rate_to_usdt = test_rates.get(from_currency, Decimal('1'))
+        else:
+            rate_to_usdt = Decimal('1')
+    
+    # Рассчитываем максимальную сумму в выбранной валюте
+    max_amount_in_currency = USDT_MAX_LIMIT / rate_to_usdt
+    
+    await state.update_data(
+        from_currency=from_currency, 
+        to_currency='USDT',
+        rate_to_usdt=str(rate_to_usdt),
+        max_amount_in_currency=str(max_amount_in_currency)
+    )
     
     await callback.message.edit_text(
         f"Вы выбрали: {CRYPTO_ASSETS[from_currency]['name']}\n\n"
         f"Введите сумму {CRYPTO_ASSETS[from_currency]['name']}, которую хотите обменять на USDT.\n"
-        f"<b>Лимит: {USDT_MAX_LIMIT} USDT в эквиваленте</b>\n\n"
-        f"<i>Пример: 0.2</i>",
+        f"<b>Максимальная сумма: {format_amount(max_amount_in_currency, from_currency)} {from_currency} ({USDT_MAX_LIMIT} USDT)</b>\n\n"
+        f"<i>Пример: {format_amount(max_amount_in_currency / Decimal('10'), from_currency)}</i>",
         parse_mode="HTML"
     )
     await state.set_state(ExchangeStates.entering_amount)
@@ -536,6 +558,7 @@ async def process_amount(message: Message, state: FSMContext):
         # Получаем данные из состояния
         data = await state.get_data()
         from_currency = data.get('from_currency')
+        max_amount_in_currency = Decimal(data.get('max_amount_in_currency', '0'))
         
         if not from_currency:
             await message.answer("❌ Ошибка: не выбрана валюта. Начните заново: /exchange")
@@ -550,13 +573,13 @@ async def process_amount(message: Message, state: FSMContext):
             return
         
         # Проверка лимита в USDT и получение курса
-        is_valid, error_msg, amount_usdt, rate_to_usdt = await validate_usdt_limit(amount, from_currency)
+        is_valid, error_msg, amount_usdt, rate_to_usdt, calculated_max = await validate_usdt_limit(amount, from_currency)
         
         if not is_valid:
             await message.answer(f"❌ {error_msg}")
             return
         
-        # Расчет комиссии и итоговой суммы (КОРРЕКТНЫЙ РАСЧЕТ)
+        # Расчет комиссии и итоговой суммы
         # 1. Комиссия в исходной валюте
         commission_original = amount * COMMISSION
         
@@ -575,18 +598,19 @@ async def process_amount(message: Message, state: FSMContext):
             'amount_usdt': str(amount_usdt),
             'rate_to_usdt': str(rate_to_usdt),
             'from_currency': from_currency,
-            'to_currency': 'USDT'
+            'to_currency': 'USDT',
+            'max_amount_in_currency': str(max_amount_in_currency)
         })
         
-        # Формируем сообщение с подтверждением (ИСПРАВЛЕННЫЙ ФОРМАТ)
+        # Формируем сообщение с подтверждением (ПОКАЗЫВАЕМ МАКСИМАЛЬНУЮ СУММУ)
         confirmation_text = f"""
 ✅ <b>Подтвердите обмен:</b>
 
 📤 Отправляете: {format_amount(amount, from_currency)} {from_currency}
-   (~{amount_usdt:.4f} USDT)
+   (максимум: {format_amount(max_amount_in_currency, from_currency)} {from_currency})
    
 📥 Получаете: {format_amount(final_amount_usdt, 'USDT')} USDT
-💸 Комиссия ({COMMISSION * 100}%): {format_amount(commission_original, from_currency)} {from_currency} (~{commission_usdt:.4f} USDT)
+💸 Комиссия ({COMMISSION * 100}%): {format_amount(commission_original, from_currency)} {from_currency}
 
 <b>Лимит обмена: {USDT_MAX_LIMIT} USDT</b>
 
@@ -605,7 +629,7 @@ async def process_amount(message: Message, state: FSMContext):
         
     except (ValueError, Exception) as e:
         logger.error(f"Ошибка обработки суммы: {e}")
-        await message.answer("❌ Пожалуйста, введите корректное число (например: 0.2)")
+        await message.answer("❌ Пожалуйста, введите корректное число")
 
 @router.callback_query(F.data == "confirm_exchange")
 async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
@@ -676,7 +700,6 @@ ID обмена: {exchange_id}
 Сумма к оплате: {format_amount(Decimal(data['amount']), data['from_currency'])} {data['from_currency']}
 Получите: {format_amount(Decimal(data['final_amount']), 'USDT')} USDT
 Комиссия: {format_amount(Decimal(data['commission_amount']), data['from_currency'])} {data['from_currency']}
-Эквивалент: ~{Decimal(data['amount_usdt']):.4f} USDT
 
 Счет действителен 15 минут
 """
