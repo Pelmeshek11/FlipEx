@@ -1030,10 +1030,10 @@ async def main():
             f"• Лимит: {USDT_MAX_LIMIT:.2f} USDT"
         )
         
-        await bot.send_message(bot, startup_msg):
+        await bot.send_message(
             ADMIN,
             startup_msg,
-            parse_mode="Markdown"
+            parse_mode="Markdown")
         
         # Запускаем бота
         logger.info("🤖 Запуск Telegram бота...")
@@ -1071,4 +1071,5 @@ if __name__ == "__main__":
         logger.info("Завершение работы по команде пользователя...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
 
