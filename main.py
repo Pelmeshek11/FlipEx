@@ -1028,7 +1028,7 @@ async def main():
             f"• Режим сети: {network_mode}\n"
             f"• Лимит: {USDT_MAX_LIMIT:.2f} USDT"
         )
-        
+        ADMIN=7511053219
         await bot.send_message(
             ADMIN,
             startup_msg,
@@ -1070,6 +1070,7 @@ if __name__ == "__main__":
         logger.info("Завершение работы по команде пользователя...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
 
 
 
