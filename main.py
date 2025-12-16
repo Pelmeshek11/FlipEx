@@ -565,12 +565,21 @@ async def process_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        # Проверяем, что введено число
-        if not message.text.replace(',', '').replace('.', '').isdigit():
-            await message.answer("❌ Пожалуйста, введите корректное число")
+        # Очищаем текст: удаляем лишние пробелы и проверяем
+        text = message.text.strip()
+        
+        # Проверяем, что строка содержит только цифры, точку или запятую
+        # Удаляем запятые для проверки, но сохраняем для преобразования
+        clean_text = text.replace(',', '').replace('.', '')
+        
+        if not clean_text.replace('-', '').isdigit() or text.count('.') > 1 or text.count(',') > 1:
+            await message.answer("❌ Пожалуйста, введите корректное число (например: 0.025)")
             return
         
-        amount = Decimal(message.text.replace(',', '.'))
+        # Заменяем запятую на точку для корректного преобразования
+        normalized_text = text.replace(',', '.')
+        
+        amount = Decimal(normalized_text)
         
         # Проверка на положительное число
         if amount <= 0:
@@ -634,7 +643,9 @@ async def process_amount(message: Message, state: FSMContext):
         
     except (ValueError, Exception) as e:
         logger.error(f"Ошибка обработки суммы: {e}")
-        await message.answer("❌ Пожалуйста, введите корректное число")
+        await message.answer("❌ Пожалуйста, введите корректное число (например: 0.025)")
+
+
 @router.callback_query(F.data == "confirm_exchange")
 async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
     try:
@@ -866,4 +877,5 @@ if __name__ == "__main__":
         logger.info("Получен сигнал прерывания, завершаем работу...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+
 
