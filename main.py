@@ -4,7 +4,6 @@ import sqlite3
 import uuid
 import os
 import re
-import requests
 from datetime import datetime
 from typing import Optional, Dict, Tuple, Any
 from contextlib import closing
@@ -1071,5 +1070,6 @@ if __name__ == "__main__":
         logger.info("Завершение работы по команде пользователя...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
 
 
