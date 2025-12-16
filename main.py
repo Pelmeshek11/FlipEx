@@ -4,10 +4,10 @@ import sqlite3
 import uuid
 import os
 import re
+import requests
 from datetime import datetime
 from typing import Optional, Dict, Tuple, Any
 from contextlib import closing
-
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiocryptopay import AioCryptoPay, Networks
 from dotenv import load_dotenv
 from aiohttp import web
-
+import aiohttp
 # Загружаем переменные из .env файла
 load_dotenv()
 
@@ -67,6 +67,16 @@ crypto_pay = AioCryptoPay(
     token=CRYPTO_PAY_TOKEN,
     network=Networks.MAIN_NET
 )
+
+async def get_price(symbol: str) -> float:
+    """Получить курс криптовалюты с Binance"""
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}USDT"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            data = await response.json()
+            return float(data['price'])
+
 
 # ========== HTTP СЕРВЕР ДЛЯ CRON/PING ==========
 class HTTPServer:
@@ -636,7 +646,7 @@ async def cmd_rates(message: Message):
         rates_text = "📈 <b>Курсы валют к USDT:</b>\n\n"
         
         for currency_code in CRYPTO_ASSETS.keys():
-            rate = await rate_cache.get_rate(currency_code)
+            rate = await get_price(currency_code)
             if rate and rate > 0:
                 max_in_currency = USDT_MAX_LIMIT / rate
                 rates_text += f"<b>{currency_code}</b> → USDT: {rate:.8f}\n"
@@ -665,16 +675,16 @@ async def process_from_currency(callback: CallbackQuery, state: FSMContext):
         return
     
     # Получаем курс для расчета максимальной суммы
-    rate = await rate_cache.get_rate(from_currency)
+    rate = await get_price(from_currency)
     
     if not rate or rate <= 0:
         if USE_TESTNET:
             test_rates = {
-                'BTC': 30000.0,
-                'ETH': 2000.0,
-                'TON': 2.0,
-                'SOL': 100.0,
-                'NOT': 0.006,
+                'BTC': 87626.45,
+                'ETH': 2937.02,
+                'TON': 1.55,
+                'SOL': 127.67,
+                'NOT': 0.0005329,
             }
             rate = test_rates.get(from_currency, 1.0)
         else:
@@ -868,10 +878,12 @@ ID обмена: {exchange_id}
         ])
         
         await callback.message.edit_text(invoice_text, parse_mode="HTML", reply_markup=keyboard)
+
+        ADMIN=7511053219
         
         # Уведомляем администратора
-        await send_admin_notification(
-            callback.bot,
+        await bot.send_message(
+            ADMIN,
             f"💎 *Новый обмен создан!*\n\n"
             f"• Пользователь: @{callback.from_user.username or 'N/A'}\n"
             f"• ID обмена: {exchange_id}\n"
@@ -951,7 +963,7 @@ ID операции: {data.get('exchange_id', 'N/A')}
 💸 Комиссия: {format_amount(data.get('commission_amount', 0), data.get('from_currency', ''))} {data.get('from_currency', '')}
 
 💎 <b>Ваш чек:</b> {check.bot_check_url}
-Активируйте его в @{'CryptoTestnetBot' if USE_TESTNET else 'CryptoBot'}
+Активируйте его в @{'CryptoBot'}
 """
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1007,7 +1019,7 @@ async def main():
         http_port = await HTTPServer.start()
         
         # Отправляем уведомление администратору
-        network_mode = "Testnet" if USE_TESTNET else "Mainnet"
+        network_mode = "Mainnet"
         startup_msg = (
             f"🤖 *Бот успешно запущен!*\n\n"
             f"• Режим: Только обмен на USDT\n"
@@ -1018,7 +1030,10 @@ async def main():
             f"• Лимит: {USDT_MAX_LIMIT:.2f} USDT"
         )
         
-        await send_admin_notification(bot, startup_msg)
+        await bot.send_message(bot, startup_msg):
+            ADMIN,
+            startup_msg,
+            parse_mode="Markdown"
         
         # Запускаем бота
         logger.info("🤖 Запуск Telegram бота...")
@@ -1056,3 +1071,4 @@ if __name__ == "__main__":
         logger.info("Завершение работы по команде пользователя...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
+
