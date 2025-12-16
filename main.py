@@ -565,6 +565,11 @@ async def process_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
+        # Проверяем, что введено число
+        if not message.text.replace(',', '').replace('.', '').isdigit():
+            await message.answer("❌ Пожалуйста, введите корректное число")
+            return
+        
         amount = Decimal(message.text.replace(',', '.'))
         
         # Проверка на положительное число
@@ -602,7 +607,7 @@ async def process_amount(message: Message, state: FSMContext):
             'max_amount_in_currency': str(max_amount_in_currency)
         })
         
-        # Формируем сообщение с подтверждением (ПОКАЗЫВАЕМ МАКСИМАЛЬНУЮ СУММУ)
+        # Формируем сообщение с подтверждением
         confirmation_text = f"""
 ✅ <b>Подтвердите обмен:</b>
 
@@ -630,7 +635,6 @@ async def process_amount(message: Message, state: FSMContext):
     except (ValueError, Exception) as e:
         logger.error(f"Ошибка обработки суммы: {e}")
         await message.answer("❌ Пожалуйста, введите корректное число")
-
 @router.callback_query(F.data == "confirm_exchange")
 async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
     try:
@@ -862,3 +866,4 @@ if __name__ == "__main__":
         logger.info("Получен сигнал прерывания, завершаем работу...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+
