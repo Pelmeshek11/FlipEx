@@ -565,21 +565,27 @@ async def process_amount(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        # Очищаем текст: удаляем лишние пробелы и проверяем
+        # Извлекаем первое числовое значение из текста
         text = message.text.strip()
         
-        # Проверяем, что строка содержит только цифры, точку или запятую
-        # Удаляем запятые для проверки, но сохраняем для преобразования
-        clean_text = text.replace(',', '').replace('.', '')
+        # Ищем первое число в тексте (включая десятичные числа)
+        import re
+        # Регулярное выражение для поиска чисел с плавающей точкой
+        pattern = r'[-+]?\d*\.\d+|\d+'
+        matches = re.findall(pattern, text)
         
-        if not clean_text.replace('-', '').isdigit() or text.count('.') > 1 or text.count(',') > 1:
-            await message.answer("❌ Пожалуйста, введите корректное число (например: 0.025)")
+        if not matches:
+            await message.answer("❌ Не найдено числовое значение. Введите сумму (например: 0.025)")
             return
         
-        # Заменяем запятую на точку для корректного преобразования
-        normalized_text = text.replace(',', '.')
+        # Берем первое найденное число
+        number_str = matches[0].replace(',', '.')
         
-        amount = Decimal(normalized_text)
+        try:
+            amount = Decimal(number_str)
+        except (ValueError, Exception):
+            await message.answer("❌ Пожалуйста, введите корректное число (например: 0.025)")
+            return
         
         # Проверка на положительное число
         if amount <= 0:
@@ -641,10 +647,9 @@ async def process_amount(message: Message, state: FSMContext):
         await message.answer(confirmation_text, parse_mode="HTML", reply_markup=keyboard)
         await state.set_state(ExchangeStates.confirming_exchange)
         
-    except (ValueError, Exception) as e:
+    except Exception as e:
         logger.error(f"Ошибка обработки суммы: {e}")
-        await message.answer("❌ Пожалуйста, введите корректное число (например: 0.025)")
-
+        await message.answer("❌ Произошла ошибка. Пожалуйста, попробуйте еще раз.")
 
 @router.callback_query(F.data == "confirm_exchange")
 async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
@@ -877,5 +882,6 @@ if __name__ == "__main__":
         logger.info("Получен сигнал прерывания, завершаем работу...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+
 
 
