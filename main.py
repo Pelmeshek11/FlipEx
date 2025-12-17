@@ -46,18 +46,17 @@ if not all([TOKEN, CRYPTO_PAY_TOKEN]):
     raise ValueError("Установите BOT_TOKEN и CRYPTO_PAY_TOKEN в .env файле")
 
 # Константы
-USDT_MAX_LIMIT = 0.5
 COMMISSION_RATE = 0.05  # 5%
 MIN_USDT_AMOUNT = 0.01
 CACHE_DURATION = 300  # 5 минут
 
-# Валюты для обмена на USDT (структура: код: {'name': название, 'decimals': знаки})
+# Валюты для обмена на USDT с их лимитами
 CRYPTO_ASSETS = {
-    'BTC': {'name': 'Bitcoin', 'decimals': 8},
-    'ETH': {'name': 'Ethereum', 'decimals': 6},
-    'SOL': {'name': 'Solana', 'decimals': 3},
-    'TON': {'name': 'Toncoin', 'decimals': 3},
-    'NOT': {'name': 'Notcoin', 'decimals': 0},
+    'BTC': {'name': 'Bitcoin', 'decimals': 8, 'max_limit': 0.00003},
+    'ETH': {'name': 'Ethereum', 'decimals': 6, 'max_limit': 0.001},
+    'SOL': {'name': 'Solana', 'decimals': 3, 'max_limit': 0.01},
+    'TON': {'name': 'Toncoin', 'decimals': 3, 'max_limit': 0.5},
+    'NOT': {'name': 'Notcoin', 'decimals': 0, 'max_limit': 500},
 }
 
 # Инициализация Crypto Pay API
@@ -333,7 +332,7 @@ async def validate_amount(amount: float, currency: str) -> Tuple[bool, str, Opti
     """
     Проверяет сумму обмена
     
-    Возвращает: (is_valid, error_message, amount_usdt, max_in_currency)
+    Возвращает: (is_valid, error_message, amount_usdt, max_limit)
     """
     if amount <= 0:
         return False, "Сумма должна быть больше 0", None, None
@@ -343,22 +342,22 @@ async def validate_amount(amount: float, currency: str) -> Tuple[bool, str, Opti
         return False, f"Не удалось получить курс {currency}/USDT", None, None
     
     amount_usdt = amount * rate
-    max_in_currency = USDT_MAX_LIMIT / rate
+    max_limit = CRYPTO_ASSETS[currency]['max_limit']
     
     if amount_usdt < MIN_USDT_AMOUNT:
         min_in_currency = MIN_USDT_AMOUNT / rate
         return False, (
             f"Минимальная сумма: {format_amount(min_in_currency, currency)} {currency} "
             f"(${MIN_USDT_AMOUNT:.2f} USDT)"
-        ), amount_usdt, max_in_currency
+        ), amount_usdt, max_limit
     
-    if amount_usdt > USDT_MAX_LIMIT:
+    if amount > max_limit:
         return False, (
-            f"Максимальная сумма: {format_amount(max_in_currency, currency)} {currency} "
-            f"(${USDT_MAX_LIMIT:.2f} USDT)"
-        ), amount_usdt, max_in_currency
+            f"Максимальная сумма: {format_amount(max_limit, currency)} {currency} "
+            f"(${(max_limit * rate):.2f} USDT)"
+        ), amount_usdt, max_limit
     
-    return True, "", amount_usdt, max_in_currency
+    return True, "", amount_usdt, max_limit
 
 def get_currency_keyboard() -> InlineKeyboardMarkup:
     """Создает клавиатуру для выбора валюты"""
@@ -391,20 +390,19 @@ async def cmd_start(message: Message, state: FSMContext):
         message.from_user.full_name
     )
     
+    # Формируем текст с лимитами
+    limits_text = ""
+    for code, info in CRYPTO_ASSETS.items():
+        limits_text += f"• {info['name']} ({code}): макс. {format_amount(info['max_limit'], code)}\n"
+    
     welcome_text = f"""
 👋 Добро пожаловать в Crypto Exchange Bot!
 
 💰 <b>Обмен криптовалюты на USDT</b>
 
 Доступные валюты:
-• Bitcoin (BTC) → USDT
-• Ethereum (ETH) → USDT  
-• Solana (SOL) → USDT
-• Toncoin (TON) → USDT
-• Notcoin (NOT) → USDT
-
+{limits_text}
 📊 <b>Лимиты:</b>
-Максимальная сумма: <b>{USDT_MAX_LIMIT:.2f} USDT</b>
 Минимальная сумма: <b>${MIN_USDT_AMOUNT:.2f} USDT</b>
 Комиссия: <b>{COMMISSION_RATE * 100:.1f}%</b>
 
@@ -486,14 +484,14 @@ async def cmd_rates(message: Message):
     try:
         rates_text = "📈 <b>Текущие курсы к USDT:</b>\n\n"
         
-        for currency in CRYPTO_ASSETS.keys():
+        for currency, info in CRYPTO_ASSETS.items():
             rate = await rate_cache.get_rate(currency)
             if rate and rate > 0:
-                max_in_currency = USDT_MAX_LIMIT / rate
+                max_limit = info['max_limit']
+                max_usdt = max_limit * rate
                 rates_text += f"<b>{currency}</b>: 1 = {rate:.8f} USDT\n"
-                rates_text += f"Макс: {format_amount(max_in_currency, currency)} {currency}\n\n"
+                rates_text += f"Макс: {format_amount(max_limit, currency)} {currency} (${max_usdt:.2f} USDT)\n\n"
         
-        rates_text += f"💡 Общий лимит: {USDT_MAX_LIMIT:.2f} USDT\n"
         rates_text += f"💸 Комиссия: {COMMISSION_RATE * 100:.1f}%"
         
         await message.answer(rates_text, parse_mode="HTML")
@@ -512,27 +510,28 @@ async def process_currency(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Неизвестная валюта")
         return
     
-    # Получаем курс для расчета максимальной суммы
+    # Получаем курс для расчета максимальной суммы в USDT
     rate = await rate_cache.get_rate(currency)
     if not rate or rate <= 0:
         await callback.answer("❌ Ошибка получения курса")
         return
     
-    max_in_currency = USDT_MAX_LIMIT / rate
     currency_info = CRYPTO_ASSETS[currency]
+    max_limit = currency_info['max_limit']
+    max_usdt = max_limit * rate
     
     await state.update_data({
         'currency': currency,
         'rate': rate,
-        'max_in_currency': max_in_currency
+        'max_limit': max_limit
     })
     
     await callback.message.edit_text(
         f"Вы выбрали: {currency_info['name']} ({currency})\n\n"
         f"Введите сумму {currency}, которую хотите обменять на USDT.\n"
-        f"<b>Максимум: {format_amount(max_in_currency, currency)} {currency} "
-        f"({USDT_MAX_LIMIT:.2f} USDT)</b>\n\n"
-        f"<i>Пример: {format_amount(max_in_currency / 20, currency)}</i>",
+        f"<b>Максимум: {format_amount(max_limit, currency)} {currency} "
+        f"(${max_usdt:.2f} USDT)</b>\n\n"
+        f"<i>Пример: {format_amount(max_limit / 10, currency)}</i>",
         parse_mode="HTML"
     )
     await state.set_state(ExchangeStates.entering_amount)
@@ -555,7 +554,7 @@ async def process_amount(message: Message, state: FSMContext):
             await message.answer("❌ Введите корректное число (например: 0.025)")
             return
         
-        is_valid, error_msg, amount_usdt, max_in_currency = await validate_amount(amount, currency)
+        is_valid, error_msg, amount_usdt, max_limit = await validate_amount(amount, currency)
         
         if not is_valid:
             await message.answer(f"❌ {error_msg}")
@@ -786,14 +785,19 @@ async def main():
         # Запускаем HTTP сервер
         await HTTPServer.start()
         
+        # Формируем текст с лимитами для администратора
+        limits_text = ""
+        for code, info in CRYPTO_ASSETS.items():
+            limits_text += f"• {code}: макс. {format_amount(info['max_limit'], code)}\n"
+        
         # Уведомление администратора
         await bot.send_message(
             ADMIN_ID,
             f"🤖 *Бот запущен!*\n\n"
-            f"• Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"• Лимит: {USDT_MAX_LIMIT:.2f} USDT\n"
+            f"• Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"<b>Лимиты валют:</b>\n{limits_text}\n"
             f"• Комиссия: {COMMISSION_RATE * 100:.1f}%",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         
         logger.info("🤖 Бот запущен")
