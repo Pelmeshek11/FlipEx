@@ -396,15 +396,12 @@ async def cmd_start(message: Message, state: FSMContext):
         limits_text += f"• {info['name']} ({code}): макс. {format_amount(info['max_limit'], code)}\n"
     
     welcome_text = f"""
-👋 Добро пожаловать в Crypto Exchange Bot!
+👋 Добро пожаловать в FlipExchange!
 
 💰 <b>Обмен криптовалюты на USDT</b>
 
 Доступные валюты:
 {limits_text}
-📊 <b>Лимиты:</b>
-Минимальная сумма: <b>${MIN_USDT_AMOUNT:.2f} USDT</b>
-Комиссия: <b>{COMMISSION_RATE * 100:.1f}%</b>
 
 📋 <b>Доступные команды:</b>
 /exchange - начать обмен
@@ -814,3 +811,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
